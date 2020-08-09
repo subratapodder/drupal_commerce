@@ -1,0 +1,7 @@
+type: module
+name: Custom Commerce
+description: Customisation of Drupal Commerce
+package: Commerce
+core: 8.x
+dependencies:
+  - drupal:commerce

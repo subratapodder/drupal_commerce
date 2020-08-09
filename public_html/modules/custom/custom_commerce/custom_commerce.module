@@ -1,0 +1,132 @@
+<?php
+
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\commerce_product\Entity\Product;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\Core\Entity\Display\EntityViewDisplayInterface;
+use Drupal\commerce_price\Price;
+use Drupal\commerce_order\Entity\Order;
+/**
+ * hook_form_alter
+ */
+function custom_commerce_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+    if (strpos($form_id, 'commerce_order_item_add_to_cart_form') !== FALSE) {
+      custom_commerce_add_to_cart_form_alter($form, $form_state);
+    }
+}
+  
+/**
+ * Custom function to alter add to cart form
+ */
+function custom_commerce_add_to_cart_form_alter(&$form, FormStateInterface $form_state) {
+    $parameter = \Drupal::routeMatch()->getParameter('commerce_product');
+    $product_id = (int)$parameter->id();  
+    if ($product_id && $product_id == 1) {
+        $product = Product::load($product_id);
+        // Load Product Variations
+        $entity_manager = \Drupal::entityManager();
+        $product_variation = $entity_manager->getStorage('commerce_product_variation')->load((int)$product->getVariationIds()[0]);
+        $price_number = $product_variation->get('price')->getValue()[0]['number'];
+        $form['custom_price'] = array(
+            '#type' => 'textfield',
+            '#title' => t("Price"),
+            '#size' => '15',
+            '#required' => TRUE,
+            '#attributes' => array(
+                'autocomplete'=>'off',
+                'pattern'=>array('[+-]?([0-9]*[.])?[0-9]+'), 
+                'oninvalid'=>array("setCustomValidity('Invalid Price Input')"),
+                'oninput'=>array("setCustomValidity('')") 
+            ),
+            '#element_validate' => array('custom_commerce_price_validate'),
+            '#default_value' => number_format((float)$price_number, 2, '.', ''),
+            '#field_prefix' => '$',
+        );
+        $form['product_id'] = array(
+            '#type' => 'hidden',
+            '#default_value' => $product_id,
+        );
+        $form['actions']['submit']['#submit'][] = 'custom_commerce_product_price_update';
+    }
+}
+// Server side validation for price
+function custom_commerce_price_validate($element, &$form_state) {
+    if (!is_numeric($element['#value'])) {
+        $form_state->setErrorByName('custom_price', t('Invalid Price Input.'));
+    }
+}
+// Hide the price field
+function custom_commerce_entity_view_alter(array &$build, EntityInterface $entity,  EntityViewDisplayInterface $display) {
+    $parameter = \Drupal::routeMatch()->getParameter('commerce_product');
+    if (!empty($parameter)) {
+        $pid = (int)$parameter->id();
+        if ($pid && ($pid == 1) && (isset($build['price']))) {
+            unset($build['price']);
+        }
+    }    
+}
+// Custom update function to change product price 
+function custom_commerce_product_price_update(&$form, FormStateInterface $form_state) {
+    $cutom_price = trim($form_state->getValue('custom_price'));
+    $product_id = $form_state->getValue('product_id');
+    if (\Drupal::currentUser()->isAnonymous()) {
+        $cart_session = \Drupal::service('commerce_cart.cart_session');
+        $current_orders = $cart_session->getCartIds();
+        if (!empty($current_orders)) {
+            foreach ($current_orders as $order_id) {
+                $orders = \Drupal::entityTypeManager()
+                    ->getStorage('commerce_order')
+                    ->loadByProperties(['order_id' => $order_id, 'state' => 'draft']);
+                $order_details = reset($orders);
+            }
+        }
+    }
+    else {
+        $current_user_id = \Drupal::currentUser()->id();
+        if ($current_user_id) {
+            $orders = \Drupal::entityTypeManager()
+                ->getStorage('commerce_order')
+                ->loadByProperties(['uid' => $current_user_id, 'state' => 'draft']);
+            $order_details = reset($orders);            
+        }                
+    }
+   // Update order item
+   if (!empty($order_details)) {
+       $order_price_total = 0;
+        foreach ($order_details->getItems() as $order_item) {
+            $pid = $order_item->getPurchasedEntityId();            
+            $total_price = trim($order_item->getTotalPrice());
+            if ($product_id == $pid) {
+                $new_rounded_price = \Drupal::getContainer()->get('commerce_price.rounder')->round(new Price($cutom_price, 'USD'));
+                $order_item->setUnitPrice($new_rounded_price, TRUE);
+                $order_item->save();
+            }
+            $order_price_total += (float)$total_price;
+        }
+   }
+   // order total price update
+   $order_id = $order_details->get('order_id')->value;
+   if ($order_id) {
+        $order = Order::load($order_id);
+        $order->set('total_price', $order_price_total);
+        $order->save();
+   }
+}
+
+/**
+* Implements hook_mail().
+*/
+function custom_commerce_mail($key, &$message, $params) {
+    $options = array(
+      'langcode' => $message['langcode'],
+    );   
+    switch ($key) {
+      case 'thank_you_commerce':
+        $message['from'] = \Drupal::config('system.site')->get('mail');
+        $message['subject'] = t('@subject', array('@subject' => $params['subject']), $options);
+        $message['body'][] = $params['message'];
+        break;
+    }
+}
+
+
